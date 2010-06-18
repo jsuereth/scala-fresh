@@ -4,6 +4,10 @@ import java.io.File
 import dispatch._
 import Http._
 
+
+/**This defines a utility that can be used to upload scala-fresh configuration information for downstream builds
+ * to make use of, e.g. SBT
+ */
 object DumpConfig {
   private val url_prefix = "http://nexus.scala-tools.org/content/sites/scala-fresh/"
   
@@ -58,7 +62,30 @@ object DumpConfig {
     val http = new Http
     val req = :/("nexus.scala-tools.org") / "content/sites/scala-fresh" / buildName / fileName
     val post = req << contents
-    val rauth = post as ("hudson", "TODO - Pull auth from hudson auth file in home directory!")
-    http(rauth >>> System.out)
+    // Check for maven credentials first
+    MavenHelper.readMavenCredentials() match {
+      case Some((username, password)) =>
+        val rauth = post as (username, password)
+        http(rauth >>> System.out)
+      case None =>
+        // Attempt post with no credentials
+        http(post >>> System.out)
+    }
+
+  }
+
+  /** Uploads Scala-fresh configuration onto Nexus for other to use */
+  def dumpSbtConfig(buildName : String, scalaVersion : String, scalaRepo : String) = {
+    dumpToUrl(buildName, "sbt.boot.properties", makeConfig(scalaVersion, scalaRepo))
+  }
+
+  def main(args : Array[String]) : Unit = {
+    //Argument 1 is buildName
+    val buildName = args(0)
+    //argument 2 is Scala version
+    val scalaVersion = args(1)
+
+    lazy val staging_scala_repo = "TODO - Figure me out!"
+    dumpSbtConfig(buildName, scalaVersion, staging_scala_repo)
   }
 }

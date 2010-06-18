@@ -1,0 +1,23 @@
+#!/bin/bash
+
+
+FRESH_BUILD="test-build"
+CURRENT_DIR="."
+
+if [ ! -e "sbt_fresh/sbt" ]; then
+  mkdir -p sbt_fresh/sbt
+fi
+
+# TODO - Don't require sbt-launcher to be local!
+if [ ! -e "sbt_fresh/sbt-launch.jar" ]; then
+  pushd sbt_fresh
+  wget http://nexus.scala-tools.org/content/sites/scala-fresh/${FRESH_BUILD}/sbt-launch.jar
+  popd
+fi
+
+# TODO - Just ensure up-to-date config!
+wget -O - http://nexus.scala-tools.org/content/sites/scala-fresh/${FRESH_BUILD}/sbt.boot.properties > sbt_fresh/sbt/sbt.boot.properties;
+
+
+echo java -cp "${CURRENT_DIR}/sbt_fresh:${CURRENT_DIR}/sbt_fresh/sbt-launch.jar" xsbt.boot.Boot $@
+java -cp "${CURRENT_DIR}/sbt_fresh:${CURRENT_DIR}/sbt_fresh/sbt-launch.jar" xsbt.boot.Boot $@
