@@ -1,111 +1,168 @@
-import java.io.{File, FileInputStream,FileOutputStream,BufferedInputStream,BufferedOutputStream,InputStream}
+package synchronize
+
+import dispatch.Http
+import dispatch.Request
+import org.apache.http.client.methods.{HttpPut, HttpRequestBase}
+import org.apache.http.entity.InputStreamEntity
+import org.apache.http.params.HttpProtocolParams
+import java.io.{InputStream,OutputStream,File,FileInputStream}
+
+/**
+ * Type trait representing an item that has a name.
+ */
+trait NamedItem[T] {
+  def name(item : T) : String
+  def debugName(item : T) : String
+}
+
+/**
+ * Defines the interface for reading from a particular location.
+ */
+trait SynchronizeFromItem[T] extends NamedItem[T] {
+  /** Returns whether or not this item is a directory (i.e. has children) */
+  def isDirectory(item : T) : Boolean
+  /** Returns all the children of this item */
+  def children(item : T) : Seq[T]
+  /** Returns the contents of this item as a java.io.InputStream of bytes
+   * Also includes the length and mime type. 
+   */
+  def content(item : T) : InputStream
+}
+
+object SynchronizeFromItem {
+  implicit val file = JavaFileLike
+}
+
+object SynchronizeToItem {
+  implicit val file = JavaFileLike
+  implicit val request = WebDavSynchronizeTo
+}
+
+/**
+ * This type trait defines the interface for locations that can be synchronized to.
+ */
+trait SynchronizeToItem[T] extends NamedItem[T] {
+  /**
+   * Constructs a (possible "null-object") reference to a child item using a parent item.
+   */
+  def child(parent : T, name : String) : T
+  /** Creates all directories needed for this reference to be a directory */
+  def mkdirs(item : T) : Unit
+  /** Writes the content provided by an input stream to this item */
+  def writeContent(item : T, otherContent : InputStream) : Unit
+}
 
 /**
  * Defines an interface for things that are like files for our synchronization code.
  */
-trait FileLike[T] {
-  def name(file : T) : String
-  def isDirectory(file : T) : Boolean
-  def children(directory : T) : Seq[T]
-  // Creates new child of given name under this directory (throws if this is not a directory)
-  def child(parent : T, name : String) : T
-  def mkdirs(file : T) : Unit
+trait FileLike[T] extends SynchronizeFromItem[T] with SynchronizeToItem[T]
 
-  def content(file : T) : InputStream
-  // This will write a new file if it doesn't exist
-  def writeContent(file : T, otherContent : InputStream) : Unit
+/** Implements FileLike for java.io.File */
+object JavaFileLike extends FileLike[File] {
+  override def name(file : File) = file.getName()
+  override def debugName(file : File) = file.getAbsolutePath
+  override def isDirectory(file : File) = file.isDirectory()
+  override def children(directory : File) = directory.listFiles() //TODO - Lift null
+  override def child(parent : File, name : String) = new java.io.File(parent, name)
+  override def mkdirs(file : File) : Unit = file.mkdirs()
+  override def content(file : File) = {
+    //val parser = new net.sf.jmimemagic.Magic()
+    //val mimeType = net.sf.jmimemagic.Magic.getMagicMatch(file, true).getMimeType
+    new FileInputStream(file) //, file.length, mimeType)
+  }
+  override def writeContent(file : File, otherContent : InputStream) = {
+    // TODO - Auto close input stream? yes...
+    val bufferedOutput = new java.io.BufferedOutputStream(new java.io.FileOutputStream(file))
+    StreamUtil.writeStream(otherContent, bufferedOutput)
+  }
 }
 
-object FileLike {
-
-  implicit val ioFileLike = new FileLike[File] {
-    override def name(file : File) = file.getName()
-    override def isDirectory(file : File) = file.isDirectory()
-    override def children(directory : File) = directory.listFiles() //TODO - Lift null
-    override def child(parent : File, name : String) = new java.io.File(parent, name)
-    override def mkdirs(file : File) : Unit = file.mkdirs()
-    override def content(file : File) = new FileInputStream(file)
-    override def writeContent(file : File, otherContent : InputStream) = {
-      // TODO - Auto close input stream? yes...
-      val bufferedOutput = new java.io.BufferedOutputStream(new java.io.FileOutputStream(file))
-      try {
-        val bufferedInput = new java.io.BufferedInputStream(otherContent)
-        val buffer = new Array[Byte](512)
-        var ready : Int = 0
-        ready = bufferedInput.read(buffer)
-        while(ready != -1) {
-          if(ready > 0) {
-            bufferedOutput.write(buffer, 0, ready)
-          }
-          ready = bufferedInput.read(buffer)
+object StreamUtil {
+  def writeStream(input : InputStream, output : OutputStream) : Unit = {
+     try {
+      val bufferedInput = new java.io.BufferedInputStream(input)
+      val buffer = new Array[Byte](512)
+      var ready : Int = 0
+      ready = bufferedInput.read(buffer)
+      while(ready != -1) {
+        if(ready > 0) {
+          output.write(buffer, 0, ready)
         }
-      } finally {
-        otherContent.close()
-        bufferedOutput.close()
+        ready = bufferedInput.read(buffer)
       }
+    } finally {
+      input.close()
+      output.close()
     }
   }
-  import dispatch.Http
-  import dispatch.Request
-  implicit val webDavFileLike = new FileLike[Request] {
-    import Http._
-    override def name(file : Request) = {
-      val path = file.to_uri.getPath
-      path.lastIndexOf('/') match {
-        case -1 => path
-        case x => path.substring(x+1)
-      }
-    }
-    // Dummy implementation for now!
-    override def isDirectory(file : Request) = {
-      file.to_uri.getPath.contains('.')
-    }
-    override def children(directory : Request) = List()
-    override def child(parent : Request, name : String) = parent / name
-    override def mkdirs(directory : Request) = error("TODO - mkdir")
-    override def content(file : Request) = error("TODO - content")
-    override def writeContent(file : Request, otherContent : InputStream) = error("TODO - writeContent")
+}
 
+// Synchronize implementation for dispatch requests and webdav-ish stuff.
+object WebDavSynchronizeTo extends SynchronizeToItem[Request] {
+  import Http._
+  override def name(request : Request) = {
+    val path = request.to_uri.getPath
+    path.lastIndexOf('/') match {
+      case -1 => path
+      case x => path.substring(x+1)
+    }
+  }
+  override def debugName(request : Request) = request.to_uri.toASCIIString
+  override def child(parent : Request, name : String) = parent / name
+  override def mkdirs(directory : Request) = () // We think we can get away with this
+  override def writeContent(request : Request, otherContent : InputStream) = {
+    // Write entire file to a buffer -> TODO - this is kind of horrible for big files!
+    val bufferStream = new java.io.ByteArrayOutputStream
+    StreamUtil.writeStream(otherContent, bufferStream)
+    val put = request << bufferStream.toString("UTF-8")
+    // Construct a new PUT request with the input stream as the content
+    /*val put = request next {
+        val m = new HttpPut
+        val e = new InputStreamEntity(otherContent, length)
+        e.setContentType(mimeType)
+        m setEntity e
+        HttpProtocolParams.setUseExpectContinue(m.getParams, false)
+        Request.mimic(m)_
+    }*/
+    // Write the content out and print the resulting HTML...
+    Http(put >>> System.out)
   }
 }
 
 // Utility to synchronize files
 object SynchUtil {
-
-  def synchronize[F : FileLike, T : FileLike](from : F, to : T) : Unit = {
-    val fromHelper = implicitly[FileLike[F]]
-    val toHelper = implicitly[FileLike[T]]
-
-
-    /** Synchronizes two files */
-    def synchronizeFile(file1 : F, file2 : T) : Unit = {
-      Console.println("Writing [" + fromHelper.name(file1) + "] to [" + toHelper.name(file2) + "]")
-      toHelper.writeContent(file2, fromHelper.content(file1))
-    }
-
-    def synchronizeDirectory(dir1 : F, dir2 : T) : Unit = {
-      def findFile(file : F, directory : T) : Option[T] =
-        (for { file2 <- toHelper.children(directory)
-          if fromHelper.name(file) == toHelper.name(file2)
-        } yield file2).headOption
-      // Iterate over all files in this directory and sync
-      for(file1 <- fromHelper.children(dir1)) {
-        val file2 = findFile(file1, dir2).
-                getOrElse(toHelper.child(dir2, fromHelper.name(file1)))
-        if(fromHelper.isDirectory(file1)) {
-          toHelper.mkdirs(file2) // Ensure Directory for sync
-          Console.println("Syncing [" + fromHelper.name(file1) + "] to [" + toHelper.name(file2) + "]")
-        }
-        synchronize(file1, file2)
-      }
-    }
-
-    if(fromHelper.isDirectory(from)) {
-      synchronizeDirectory(from,to)
-    } else {
-      synchronizeFile(from,to)
-    }
+  /* synchronizes two items. */
+  private def synchronizeItem[F : SynchronizeFromItem, T : SynchronizeToItem](from : F, to : T) : Unit = {
+    val fromHelper = implicitly[SynchronizeFromItem[F]]
+    val toHelper = implicitly[SynchronizeToItem[T]]
+    val inputStream = implicitly[SynchronizeFromItem[F]].content(from)
+    Console.println("Synchronizing [" + fromHelper.debugName(from) + "] to [" + toHelper.debugName(to) + "] ")// + length + " bytes of type: " + mimeType)
+    implicitly[SynchronizeToItem[T]].writeContent(to,inputStream)
   }
 
 
+  /** This method synchronizes from one location to another.  It always copies all data */
+  def synchronizeOneWay[F : SynchronizeFromItem, T : SynchronizeToItem](from : F, to : T) : Unit = {
+    val fromHelper = implicitly[SynchronizeFromItem[F]]
+    val toHelper = implicitly[SynchronizeToItem[T]]
+    // Helper method to determine if we're synching directories or files.
+    def synchronizeHelper(f : F, t : T) : Unit = {
+      if(fromHelper.isDirectory(f)) {
+          toHelper.mkdirs(t)
+          synchDirectory(f,t)
+        } else {
+          synchronizeItem(f,t)
+        }
+    }
+
+    // TODO - redesign this to be higher-order and far more flexible in *not* synching every time!
+    def synchDirectory(fromDir : F, toDir : T) : Unit = {
+      Console.println("Synchronizing [" + fromHelper.debugName(from) + "] to [" + toHelper.debugName(to) + "]")
+      for(file1 <- fromHelper.children(fromDir)) {
+        val file2 = toHelper.child(toDir, fromHelper.name(file1))
+        synchronizeHelper(file1, file2)
+      }
+    }
+    synchronizeHelper(from, to)
+  }
 }
